@@ -1,5 +1,9 @@
+use std::fs::OpenOptions;
+use std::io::Write;
+
 use iced::widget::{button, column, container, scrollable, text, Rule};
-use iced::{theme, Color, Element, Length, Sandbox, Settings};
+use iced::Length;
+use iced::{theme, Element, Sandbox, Settings};
 use mysql::prelude::*;
 use mysql::*;
 const WINDOW_WIDTH: u16 = 1600;
@@ -27,6 +31,12 @@ pub enum Message {
 struct Table {
     page: i32,
     table_name: String,
+    columns: Vec<TableColumn>,
+}
+
+struct TableColumn {
+    column_name: String,
+    data_type: String,
 }
 
 impl Sandbox for Table {
@@ -51,6 +61,9 @@ impl Sandbox for Table {
             }
             Message::Table(data) => {
                 self.table_name = data;
+                let db = DB::new();
+                let mut conn = db.get_conn().unwrap();
+                self.get_columns(&mut conn);
             }
         }
     }
@@ -59,30 +72,15 @@ impl Sandbox for Table {
         let db = DB::new();
         let mut conn = db.get_conn().unwrap();
 
-        let width = (WINDOW_WIDTH - WINDOW_WIDTH / 5) / 5;
-        let header_row = iced::widget::Row::new()
-            .padding(10)
-            .push(text("id").width(width))
-            .push(text("name").width(width))
-            .push(text("robot_code").width(width))
-            .push(text("body_code").width(width))
-            .push(text("company_id").width(width));
-
-        let mut content = column!().width(Length::Fill).padding(10);
-        if let Ok(data) = self.data(&mut conn) {
-            for each in data {
-                content = content.push(
-                    iced::widget::Row::new()
-                        .padding(10)
-                        .push(text(each.id).width(width))
-                        .push(text(each.name).width(width))
-                        .push(text(each.robot_code).width(width))
-                        .push(text(each.body_code).width(width))
-                        .push(text(each.company_id).width(width)),
-                );
-            }
+        let width = 40;
+        let mut header_row = iced::widget::Row::new();
+        for column in self.columns.iter() {
+            write_into_file(self.columns.len().to_string().as_str());
+            write_into_file(&column.column_name);
+            header_row = header_row.push(text(column.column_name.clone()).width(width));
         }
 
+        // let mut content = column!().width(Length::Fill).padding(10);
         let pre_button = button("上一页").on_press(Message::PrePage);
         let next_button = button("下一页").on_press(Message::NextPage);
         let buttons = iced::widget::row!(pre_button, next_button);
@@ -95,7 +93,7 @@ impl Sandbox for Table {
                 text(&self.table_name),
                 header_row,
                 Rule::horizontal(10),
-                scrollable(content),
+                // scrollable(content),
             ]
             .align_items(iced::Alignment::Start)
         ])
@@ -124,6 +122,7 @@ impl DB {
 impl Table {
     fn query(conn: &mut PooledConn) -> anyhow::Result<Vec<String>> {
         let mut fields = Vec::new();
+
         conn.query_iter(
             "SELECT table_name  FROM information_schema.TABLES WHERE table_schema = 'cloud'",
         )
@@ -143,51 +142,50 @@ impl Table {
         let mut column = iced::widget::Column::new();
         if let Ok(tables) = self.tables(conn) {
             for each in tables {
-                column = column.push(
-                    button(text(each.clone()))
-                        .style(theme::Button::Text)
-                        .on_press(Message::Table(each.clone())),
-                );
+                column = column.push(iced::widget::row![button(
+                    text(each.clone().as_str()).size(20.0)
+                )
+                .style(theme::Button::Primary)
+                .on_press(Message::Table(each.clone())),]);
             }
-            column.width(Length::from(width)).padding(10)
+
+            column.width(Length::from(width))
         } else {
             column
         }
     }
 
-    fn data(&self, conn: &mut PooledConn) -> anyhow::Result<Vec<Robot>> {
-        let mut data = Vec::new();
-        let mut from = self.page * 20;
-        if from < 0 {
-            from = 0
-        }
-
-        let sql = format!(
-            "select id, name, robot_code, elbow_number,body_code,company_id from robot limit {},50",
-            from
-        );
-        print!("{}", &sql);
-        conn.query_iter(sql).unwrap().for_each(|row| {
-            let robot = Robot::parse_row(&mut row.unwrap());
-            data.push(robot);
-        });
-
-        Ok(data)
-    }
-
-    fn tables(&self, conn: &mut PooledConn) -> Result<Vec<String>> {
+    fn tables(&self, conn: &mut PooledConn) -> anyhow::Result<Vec<String>> {
         let mut tables = Vec::new();
+        let sql = "SELECT table_name  FROM information_schema.TABLES WHERE table_schema = 'cloud'";
 
-        conn.query_iter(
-            "SELECT table_name  FROM information_schema.TABLES WHERE table_schema = 'cloud'",
-        )
-        .unwrap()
-        .for_each(|row| {
+        conn.query_iter(sql).unwrap().for_each(|row| {
             let table_name = TableName::parse_row(&mut row.unwrap());
             tables.push(table_name.table_name);
         });
 
         Ok(tables)
+    }
+    // 获取表的字段名
+    fn get_columns(&mut self, conn: &mut PooledConn) {
+        let mut columns = Vec::new();
+        let sql = format!(
+            "select column_name,data_type from information_schema.COLUMNS where table_name = '{}' ",
+            self.table_name
+        );
+
+        conn.query_iter(sql).unwrap().for_each(|row| {
+            let mut row = row.unwrap();
+            columns.push(TableColumn {
+                column_name: row.take("column_name").unwrap(),
+                data_type: row.take("data_type").unwrap(),
+            });
+        });
+
+        write_into_file("\n");
+        write_into_file(columns.len().to_string().as_str());
+        write_into_file("\n");
+        self.columns = columns;
     }
 }
 struct TableName {
@@ -202,22 +200,7 @@ impl TableName {
     }
 }
 
-struct Robot {
-    id: i32,
-    name: String,
-    robot_code: String,
-    body_code: String,
-    company_id: i32,
-}
-
-impl Robot {
-    fn parse_row(row: &mut Row) -> Self {
-        Robot {
-            id: row.take("id").unwrap(),
-            name: row.take("name").unwrap(),
-            robot_code: row.take("robot_code").unwrap(),
-            body_code: row.take("body_code").unwrap(),
-            company_id: row.take("company_id").unwrap(),
-        }
-    }
+fn write_into_file(log: &str) {
+    let mut file = OpenOptions::new().append(true).open("log.txt").unwrap();
+    file.write(log.as_bytes());
 }
